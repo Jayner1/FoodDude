@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { SafeAreaView, View, Button, Text, FlatList, Platform } from 'react-native';
+import { View, Button, Text, FlatList, Platform } from 'react-native';
 import { Audio } from 'expo-av';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import foodDatabase from './foodDatabase.json';
 
 export default function App() {
@@ -13,6 +14,12 @@ export default function App() {
       // Request microphone permission
       const { status } = await Audio.requestPermissionsAsync();
       if (status !== 'granted') return alert('Microphone permission required.');
+
+      // iOS audio mode setup
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
 
       const rec = new Audio.Recording();
       await rec.prepareToRecordAsync(Audio.RECORDING_OPTIONS_PRESET_HIGH_QUALITY);
@@ -55,31 +62,33 @@ export default function App() {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1 }}>
-      <View style={{ padding: 20, flex: 1 }}>
-        <View style={{ marginVertical: 10 }}>
-          <Button title="Start Recording" onPress={startRecording} />
+    <SafeAreaProvider>
+      <SafeAreaView style={{ flex: 1 }}>
+        <View style={{ padding: 20, flex: 1 }}>
+          <View style={{ marginVertical: 10 }}>
+            <Button title="Start Recording" onPress={startRecording} />
+          </View>
+
+          <View style={{ marginVertical: 10 }}>
+            <Button title="Stop Recording" onPress={stopRecording} />
+          </View>
+
+          <Text style={{ marginVertical: 10, fontWeight: 'bold' }}>
+            Transcription: {transcription}
+          </Text>
+
+          <Text style={{ marginTop: 20, fontWeight: 'bold' }}>Food Log:</Text>
+          <FlatList
+            data={log}
+            keyExtractor={(item, index) => index.toString()}
+            renderItem={({ item }) => (
+              <Text>
+                {item.foodName} - {item.calories} cal, {item.protein}g P, {item.carbs}g C, {item.fat}g F
+              </Text>
+            )}
+          />
         </View>
-
-        <View style={{ marginVertical: 10 }}>
-          <Button title="Stop Recording" onPress={stopRecording} />
-        </View>
-
-        <Text style={{ marginVertical: 10, fontWeight: 'bold' }}>
-          Transcription: {transcription}
-        </Text>
-
-        <Text style={{ marginTop: 20, fontWeight: 'bold' }}>Food Log:</Text>
-        <FlatList
-          data={log}
-          keyExtractor={(item, index) => index.toString()}
-          renderItem={({ item }) => (
-            <Text>
-              {item.foodName} - {item.calories} cal, {item.protein}g P, {item.carbs}g C, {item.fat}g F
-            </Text>
-          )}
-        />
-      </View>
-    </SafeAreaView>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
