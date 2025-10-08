@@ -10,7 +10,7 @@ export default function App() {
   const [transcription, setTranscription] = useState('');
   const [log, setLog] = useState([]);
 
-  // Set iOS audio mode
+  // Set iOS audio mode 11
   const prepareAudio = async () => {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
