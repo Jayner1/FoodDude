@@ -96,8 +96,6 @@ export default function App() {
       setRecording(null);
 
       // Delete temporary file immediately
-      // Expo automatically caches in AV folder, no permanent storage
-      // Optionally, you can use expo-file-system to delete if needed
     } catch (err) {
       console.error(err);
       Alert.alert('Failed to stop recording.');
