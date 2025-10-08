@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
-import { SafeAreaView, View, Button, Text, FlatList, Alert } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { SafeAreaView, View, Button, Text, FlatList, Alert, StyleSheet, TouchableOpacity } from 'react-native';
 import { Audio } from 'expo-av';
 import axios from 'axios';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import foodDatabase from './foodDatabase.json';
 import { OPENAI_API_KEY } from '@env';
 
@@ -10,7 +11,29 @@ export default function App() {
   const [transcription, setTranscription] = useState('');
   const [log, setLog] = useState([]);
 
-  // Set iOS audio mode
+  useEffect(() => {
+    const loadLog = async () => {
+      try {
+        const savedLog = await AsyncStorage.getItem('@food_log');
+        if (savedLog) setLog(JSON.parse(savedLog));
+      } catch (err) {
+        console.error('Failed to load log', err);
+      }
+    };
+    loadLog();
+  }, []);
+
+  useEffect(() => {
+    const saveLog = async () => {
+      try {
+        await AsyncStorage.setItem('@food_log', JSON.stringify(log));
+      } catch (err) {
+        console.error('Failed to save log', err);
+      }
+    };
+    saveLog();
+  }, [log]);
+
   const prepareAudio = async () => {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
@@ -21,7 +44,6 @@ export default function App() {
   const startRecording = async () => {
     try {
       await prepareAudio();
-
       const { status } = await Audio.requestPermissionsAsync();
       if (status !== 'granted') return Alert.alert('Microphone permission required.');
 
@@ -44,14 +66,12 @@ export default function App() {
       const uri = recording.getURI();
       console.log('Recording temporary file:', uri);
 
-      // Read file as binary
       const file = {
         uri,
         type: 'audio/m4a',
         name: 'recording.m4a',
       };
 
-      // Prepare form for OpenAI Whisper API
       const formData = new FormData();
       formData.append('file', file);
       formData.append('model', 'whisper-1');
@@ -64,7 +84,7 @@ export default function App() {
           formData,
           {
             headers: {
-              'Authorization': `Bearer ${OPENAI_API_KEY}`,
+              Authorization: `Bearer ${OPENAI_API_KEY}`,
               'Content-Type': 'multipart/form-data',
             },
           }
@@ -77,57 +97,94 @@ export default function App() {
           console.error(err);
           Alert.alert('OpenAI transcription failed. Using mock transcription.');
         }
-        // Fallback transcription for testing
-        text = 'Apple, medium';
+        text = 'Apple, medium'; // fallback
       }
 
       setTranscription(text);
 
-      // Lookup in local DB
       const foodItem = foodDatabase.find(
         f => f.foodName.toLowerCase() === text.toLowerCase()
       );
+
       if (foodItem) {
-        setLog([...log, foodItem]);
+        setLog(prev => [...prev, foodItem]);
       } else {
         Alert.alert('Food not found in database.');
       }
 
       setRecording(null);
-
-      // Delete temporary file immediately
     } catch (err) {
       console.error(err);
       Alert.alert('Failed to stop recording.');
     }
   };
 
+  const deleteItem = async index => {
+    const newLog = [...log];
+    newLog.splice(index, 1);
+    setLog(newLog);
+  };
+
+  const clearLog = async () => {
+    setLog([]);
+  };
+
   return (
-    <SafeAreaView style={{ flex: 1 }}>
-      <View style={{ padding: 20, flex: 1 }}>
-        <View style={{ marginVertical: 10 }}>
-          <Button title="Start Recording" onPress={startRecording} />
-        </View>
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.headerText}>Food Dude</Text>
+      </View>
 
-        <View style={{ marginVertical: 10 }}>
-          <Button title="Stop Recording" onPress={stopRecording} />
-        </View>
+      <View style={styles.controls}>
+        <Button title="Start Recording" onPress={startRecording} />
+        <View style={{ height: 10 }} />
+        <Button title="Stop Recording" onPress={stopRecording} />
+      </View>
 
-        <Text style={{ marginVertical: 10, fontWeight: 'bold' }}>
-          Transcription: {transcription}
-        </Text>
+      <Text style={styles.transcription}>Transcription: {transcription}</Text>
 
-        <Text style={{ marginTop: 20, fontWeight: 'bold' }}>Food Log:</Text>
-        <FlatList
-          data={log}
-          keyExtractor={(item, index) => index.toString()}
-          renderItem={({ item }) => (
-            <Text>
+      <View style={styles.logHeader}>
+        <Text style={styles.logTitle}>Food Log:</Text>
+        <TouchableOpacity onPress={clearLog}>
+          <Text style={styles.clearButton}>Clear All</Text>
+        </TouchableOpacity>
+      </View>
+
+      <FlatList
+        data={log}
+        keyExtractor={(item, index) => index.toString()}
+        renderItem={({ item, index }) => (
+          <View style={styles.logItem}>
+            <Text style={styles.logText}>
               {item.foodName} - {item.calories} cal, {item.protein}g P, {item.carbs}g C, {item.fat}g F
             </Text>
-          )}
-        />
-      </View>
+            <TouchableOpacity onPress={() => deleteItem(index)} style={styles.deleteButton}>
+              <Text style={styles.deleteText}>Delete</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      />
     </SafeAreaView>
   );
 }
+
+const styles = StyleSheet.create({
+  container: { flex: 1, padding: 20, backgroundColor: '#F5F5F5' },
+  header: {
+    paddingVertical: 15,
+    alignItems: 'center',
+    backgroundColor: '#4CAF50',
+    marginBottom: 20,
+    borderRadius: 8,
+  },
+  headerText: { fontSize: 24, fontWeight: 'bold', color: '#fff' },
+  controls: { marginBottom: 20 },
+  transcription: { marginBottom: 20, fontWeight: 'bold', fontSize: 16 },
+  logHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  logTitle: { fontWeight: 'bold', fontSize: 18 },
+  clearButton: { color: 'red', fontWeight: 'bold' },
+  logItem: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderColor: '#ccc' },
+  logText: { fontSize: 16 },
+  deleteButton: { backgroundColor: '#FF5252', paddingHorizontal: 10, borderRadius: 5 },
+  deleteText: { color: '#fff', fontWeight: 'bold' },
+});
