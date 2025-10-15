@@ -1,6 +1,6 @@
 // screens/FoodLogScreen.js
 import React, { useState, useEffect } from 'react';
-import { View, Button, Text, FlatList, Alert, StyleSheet, TouchableOpacity, TextInput } from 'react-native';
+import { View, Button, Text, FlatList, Alert, StyleSheet, TouchableOpacity, TextInput, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
 import axios from 'axios';
@@ -8,10 +8,6 @@ import { auth, db } from '../firebase';
 import { doc, getDoc, setDoc, updateDoc, arrayUnion } from 'firebase/firestore';
 import foodDatabase from '../foodDatabase.json';
 import { OPENAI_API_KEY } from '@env';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { initializeAuth, getReactNativePersistence } from 'firebase/auth';
-
-initializeAuth(auth.app, { persistence: getReactNativePersistence(AsyncStorage) });
 
 const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
 
@@ -26,7 +22,7 @@ export default function FoodLogScreen() {
 
   const userId = auth.currentUser?.uid;
 
-  // Load logs from Firestore
+  /** Load logs from Firestore */
   useEffect(() => {
     const loadLog = async () => {
       if (!userId) return;
@@ -45,12 +41,14 @@ export default function FoodLogScreen() {
         }
       } catch (err) {
         console.error('Failed to load log from Firestore', err);
+        Alert.alert('Error', 'Failed to load your food log. Check your internet connection.');
       }
     };
+
     loadLog();
   }, [userId]);
 
-  // Save a single food item to Firestore
+  /** Save single food item to Firestore */
   const saveLog = async (mealName, foodItem) => {
     try {
       const docRef = doc(db, 'foodLogs', userId);
@@ -60,14 +58,16 @@ export default function FoodLogScreen() {
     }
   };
 
-  // Audio setup
+  /** Audio recording setup */
   const prepareAudio = async () => {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
       playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
     });
   };
 
+  /** Start recording */
   const startRecording = async () => {
     if (recording) return Alert.alert('Recording already in progress');
 
@@ -87,6 +87,7 @@ export default function FoodLogScreen() {
     }
   };
 
+  /** Stop recording */
   const stopRecording = async () => {
     if (!recording) return;
     try {
@@ -94,56 +95,75 @@ export default function FoodLogScreen() {
       const uri = recording.getURI();
       setRecordingQueue(prev => [...prev, uri]);
       setRecording(null);
-      Alert.alert('Recording saved locally. Will transcribe shortly.');
+      Alert.alert('Recording saved. Processing transcription...');
     } catch (err) {
       console.error(err);
       Alert.alert('Failed to stop recording.');
     }
   };
 
-  // Process recordings queue one by one
+  /** Process recordings queue one at a time */
   useEffect(() => {
     const processQueue = async () => {
       if (isProcessing || recordingQueue.length === 0) return;
-
       setIsProcessing(true);
+
       const [uri, ...rest] = recordingQueue;
       setRecordingQueue(rest);
 
-      const file = { uri, type: 'audio/m4a', name: 'recording.m4a' };
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('model', 'whisper-1');
-
-      let text = '';
       try {
-        const response = await axios.post(
-          'https://api.openai.com/v1/audio/transcriptions',
-          formData,
-          { headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'multipart/form-data' } }
-        );
-        text = response.data.text;
-      } catch (err) {
-        console.error(err);
-        if (err.response?.status === 429) {
-          Alert.alert('Rate limit hit. Please wait before recording again.');
-        } else {
-          Alert.alert('Transcription failed. Using fallback.');
-          text = 'Apple, medium';
-        }
-      }
+        // Transcribe audio via OpenAI Whisper
+        const formData = new FormData();
+        formData.append('file', {
+          uri,
+          name: 'recording.m4a',
+          type: 'audio/m4a',
+        });
+        formData.append('model', 'whisper-1');
 
-      setTranscription(text);
-      addFoodToMeal(text);
-      setIsProcessing(false);
+        let responseText = '';
+        try {
+          const response = await axios.post(
+            'https://api.openai.com/v1/audio/transcriptions',
+            formData,
+            {
+              headers: {
+                Authorization: `Bearer ${OPENAI_API_KEY}`,
+                'Content-Type': 'multipart/form-data',
+              },
+            }
+          );
+          responseText = response.data.text;
+        } catch (err) {
+          console.error(err);
+          if (err.response?.status === 429) {
+            Alert.alert('Rate limit hit. Try again in a few seconds.');
+            responseText = '';
+          } else {
+            Alert.alert('Transcription failed. Please try again.');
+            responseText = '';
+          }
+        }
+
+        // Clean transcription for database search
+        const cleanText = responseText.trim().toLowerCase().replace(/[^a-z\s]/g, '');
+        setTranscription(cleanText);
+
+        if (cleanText) addFoodToMeal(cleanText);
+      } finally {
+        setIsProcessing(false);
+      }
     };
 
     processQueue();
   }, [recordingQueue, isProcessing]);
 
-  // Add food item
+  /** Add food item to log */
   const addFoodToMeal = (foodName) => {
-    const foodItem = foodDatabase.find(f => f.foodName.toLowerCase() === foodName.toLowerCase());
+    const foodItem = foodDatabase.find(
+      f => f.foodName.toLowerCase() === foodName
+    );
+
     if (foodItem) {
       setLog(prev => {
         const updated = { ...prev, [selectedMeal]: [...(prev[selectedMeal] || []), foodItem] };
@@ -151,25 +171,25 @@ export default function FoodLogScreen() {
         return updated;
       });
     } else {
-      Alert.alert('Food not found in database.');
+      Alert.alert(`Food "${foodName}" not found in database.`);
     }
   };
 
-  // Manual text input
+  /** Manual text input */
   const handleTextSubmit = () => {
     if (!textInput.trim()) return;
-    addFoodToMeal(textInput.trim());
+    addFoodToMeal(textInput.trim().toLowerCase());
     setTextInput('');
   };
 
-  // Delete single item
+  /** Delete single item */
   const deleteItem = (meal, index) => {
     const newMealLog = [...(log[meal] || [])];
     newMealLog.splice(index, 1);
     setLog(prev => ({ ...prev, [meal]: newMealLog }));
   };
 
-  // Clear entire meal
+  /** Clear entire meal */
   const clearMeal = async (meal) => {
     setLog(prev => ({ ...prev, [meal]: [] }));
     try {
@@ -186,6 +206,7 @@ export default function FoodLogScreen() {
         <Text style={styles.headerText}>Food Dude</Text>
       </View>
 
+      {/* Meal selector */}
       <View style={styles.mealSelector}>
         {meals.map(meal => (
           <TouchableOpacity
@@ -198,12 +219,14 @@ export default function FoodLogScreen() {
         ))}
       </View>
 
+      {/* Recording buttons */}
       <View style={styles.controls}>
         <Button title="Start Recording" onPress={startRecording} color="#1A237E" />
         <View style={{ height: 10 }} />
         <Button title="Stop Recording" onPress={stopRecording} color="#1A237E" />
       </View>
 
+      {/* Manual input */}
       <TextInput
         style={styles.textInput}
         placeholder="Enter food manually..."
@@ -215,6 +238,7 @@ export default function FoodLogScreen() {
 
       <Text style={styles.transcription}>Last Entry: {transcription}</Text>
 
+      {/* Meal log */}
       <View style={styles.logHeader}>
         <Text style={styles.logTitle}>{selectedMeal} Log:</Text>
         <TouchableOpacity onPress={() => clearMeal(selectedMeal)}>

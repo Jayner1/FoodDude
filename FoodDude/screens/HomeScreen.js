@@ -1,9 +1,32 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Image } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-
+import React, { useEffect, useState } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { auth } from '../firebase';
+import { onAuthStateChanged } from 'firebase/auth';
 
 export default function HomeScreen({ navigation }) {
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        // User is logged in, navigate directly to FoodLog
+        navigation.replace('FoodLog');
+      } else {
+        setLoading(false);
+      }
+    });
+
+    return unsubscribe;
+  }, [navigation]);
+
+  if (loading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color="#1A237E" />
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Food Dude</Text>
@@ -28,7 +51,7 @@ export default function HomeScreen({ navigation }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#FFD54F', // warm yellow/gold
+    backgroundColor: '#FFD54F',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
@@ -36,16 +59,11 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 40,
     fontWeight: 'bold',
-    color: '#1A237E', // dark navy contrast
-    marginBottom: 40,
-  },
-  image: {
-    width: 250,
-    height: 250,
+    color: '#1A237E',
     marginBottom: 40,
   },
   getStartedButton: {
-    backgroundColor: '#1A237E', 
+    backgroundColor: '#1A237E',
     paddingVertical: 15,
     paddingHorizontal: 60,
     borderRadius: 30,

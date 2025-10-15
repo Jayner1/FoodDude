@@ -4,11 +4,6 @@ import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityInd
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { auth } from '../firebase';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged } from 'firebase/auth';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { initializeAuth, getReactNativePersistence } from 'firebase/auth';
-
-// Initialize Firebase Auth persistence
-initializeAuth(auth.app, { persistence: getReactNativePersistence(AsyncStorage) });
 
 export default function AuthScreen({ navigation }) {
   const [email, setEmail] = useState('');
@@ -16,11 +11,11 @@ export default function AuthScreen({ navigation }) {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(true);
 
-  // Check if user is already logged in
+  // Auto-navigate if user is already logged in
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (user) {
-        navigation.replace('FoodLog'); // Auto-navigate if already logged in
+        navigation.replace('FoodLog');
       } else {
         setLoading(false);
       }
@@ -29,7 +24,9 @@ export default function AuthScreen({ navigation }) {
   }, [navigation]);
 
   const handleAuth = async () => {
-    if (!email || !password) return Alert.alert('Please enter both email and password');
+    if (!email || !password) {
+      return Alert.alert('Please enter both email and password');
+    }
 
     try {
       if (isLogin) {
@@ -39,7 +36,7 @@ export default function AuthScreen({ navigation }) {
         await createUserWithEmailAndPassword(auth, email, password);
         Alert.alert('Account created! Logged in successfully.');
       }
-      navigation.replace('FoodLog'); 
+      navigation.replace('FoodLog');
     } catch (err) {
       Alert.alert('Authentication Error', err.message);
     }
