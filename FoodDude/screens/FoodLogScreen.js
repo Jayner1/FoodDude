@@ -1,11 +1,17 @@
+// screens/FoodLogScreen.js
 import React, { useState, useEffect } from 'react';
-import { SafeAreaView, View, Button, Text, FlatList, Alert, StyleSheet, TouchableOpacity, TextInput } from 'react-native';
+import { View, Button, Text, FlatList, Alert, StyleSheet, TouchableOpacity, TextInput } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
 import axios from 'axios';
 import { auth, db } from '../firebase';
 import { doc, getDoc, setDoc, updateDoc, arrayUnion } from 'firebase/firestore';
 import foodDatabase from '../foodDatabase.json';
 import { OPENAI_API_KEY } from '@env';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { initializeAuth, getReactNativePersistence } from 'firebase/auth';
+
+initializeAuth(auth.app, { persistence: getReactNativePersistence(AsyncStorage) });
 
 const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
 
@@ -15,12 +21,16 @@ export default function FoodLogScreen() {
   const [log, setLog] = useState({});
   const [selectedMeal, setSelectedMeal] = useState('Breakfast');
   const [textInput, setTextInput] = useState('');
+  const [recordingQueue, setRecordingQueue] = useState([]);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const userId = auth.currentUser?.uid;
 
   // Load logs from Firestore
   useEffect(() => {
     const loadLog = async () => {
+      if (!userId) return;
+
       try {
         const docRef = doc(db, 'foodLogs', userId);
         const docSnap = await getDoc(docRef);
@@ -37,21 +47,20 @@ export default function FoodLogScreen() {
         console.error('Failed to load log from Firestore', err);
       }
     };
-    if (userId) loadLog();
+    loadLog();
   }, [userId]);
 
-  // Save log to Firestore
+  // Save a single food item to Firestore
   const saveLog = async (mealName, foodItem) => {
     try {
       const docRef = doc(db, 'foodLogs', userId);
-      await updateDoc(docRef, {
-        [mealName]: arrayUnion(foodItem)
-      });
+      await updateDoc(docRef, { [mealName]: arrayUnion(foodItem) });
     } catch (err) {
       console.error('Failed to save log to Firestore', err);
     }
   };
 
+  // Audio setup
   const prepareAudio = async () => {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
@@ -60,6 +69,8 @@ export default function FoodLogScreen() {
   };
 
   const startRecording = async () => {
+    if (recording) return Alert.alert('Recording already in progress');
+
     try {
       await prepareAudio();
       const { status } = await Audio.requestPermissionsAsync();
@@ -78,17 +89,28 @@ export default function FoodLogScreen() {
 
   const stopRecording = async () => {
     if (!recording) return;
-
     try {
       await recording.stopAndUnloadAsync();
       const uri = recording.getURI();
+      setRecordingQueue(prev => [...prev, uri]);
+      setRecording(null);
+      Alert.alert('Recording saved locally. Will transcribe shortly.');
+    } catch (err) {
+      console.error(err);
+      Alert.alert('Failed to stop recording.');
+    }
+  };
 
-      const file = {
-        uri,
-        type: 'audio/m4a',
-        name: 'recording.m4a',
-      };
+  // Process recordings queue one by one
+  useEffect(() => {
+    const processQueue = async () => {
+      if (isProcessing || recordingQueue.length === 0) return;
 
+      setIsProcessing(true);
+      const [uri, ...rest] = recordingQueue;
+      setRecordingQueue(rest);
+
+      const file = { uri, type: 'audio/m4a', name: 'recording.m4a' };
       const formData = new FormData();
       formData.append('file', file);
       formData.append('model', 'whisper-1');
@@ -98,37 +120,33 @@ export default function FoodLogScreen() {
         const response = await axios.post(
           'https://api.openai.com/v1/audio/transcriptions',
           formData,
-          {
-            headers: {
-              Authorization: `Bearer ${OPENAI_API_KEY}`,
-              'Content-Type': 'multipart/form-data',
-            },
-          }
+          { headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'multipart/form-data' } }
         );
         text = response.data.text;
       } catch (err) {
         console.error(err);
-        Alert.alert('Transcription failed. Using fallback.');
-        text = 'Apple, medium';
+        if (err.response?.status === 429) {
+          Alert.alert('Rate limit hit. Please wait before recording again.');
+        } else {
+          Alert.alert('Transcription failed. Using fallback.');
+          text = 'Apple, medium';
+        }
       }
 
       setTranscription(text);
       addFoodToMeal(text);
-      setRecording(null);
-    } catch (err) {
-      console.error(err);
-      Alert.alert('Failed to stop recording.');
-    }
-  };
+      setIsProcessing(false);
+    };
 
+    processQueue();
+  }, [recordingQueue, isProcessing]);
+
+  // Add food item
   const addFoodToMeal = (foodName) => {
     const foodItem = foodDatabase.find(f => f.foodName.toLowerCase() === foodName.toLowerCase());
     if (foodItem) {
       setLog(prev => {
-        const updated = {
-          ...prev,
-          [selectedMeal]: [...prev[selectedMeal], foodItem]
-        };
+        const updated = { ...prev, [selectedMeal]: [...(prev[selectedMeal] || []), foodItem] };
         saveLog(selectedMeal, foodItem);
         return updated;
       });
@@ -137,25 +155,29 @@ export default function FoodLogScreen() {
     }
   };
 
+  // Manual text input
   const handleTextSubmit = () => {
     if (!textInput.trim()) return;
     addFoodToMeal(textInput.trim());
     setTextInput('');
   };
 
+  // Delete single item
   const deleteItem = (meal, index) => {
-    const newMealLog = [...log[meal]];
+    const newMealLog = [...(log[meal] || [])];
     newMealLog.splice(index, 1);
     setLog(prev => ({ ...prev, [meal]: newMealLog }));
-    // Firestore does not have remove by index easily; would require overwriting array
-    // We'll skip sync for deletion for now
   };
 
-  const clearMeal = (meal) => {
+  // Clear entire meal
+  const clearMeal = async (meal) => {
     setLog(prev => ({ ...prev, [meal]: [] }));
-    // Firestore: overwrite with empty array
-    const docRef = doc(db, 'foodLogs', userId);
-    setDoc(docRef, { ...log, [meal]: [] }, { merge: true });
+    try {
+      const docRef = doc(db, 'foodLogs', userId);
+      await setDoc(docRef, { ...log, [meal]: [] }, { merge: true });
+    } catch (err) {
+      console.error('Failed to clear meal in Firestore', err);
+    }
   };
 
   return (

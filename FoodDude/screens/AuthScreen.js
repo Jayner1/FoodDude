@@ -1,13 +1,32 @@
 // screens/AuthScreen.js
-import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { auth } from '../firebase';
-import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged } from 'firebase/auth';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { initializeAuth, getReactNativePersistence } from 'firebase/auth';
+
+// Initialize Firebase Auth persistence
+initializeAuth(auth.app, { persistence: getReactNativePersistence(AsyncStorage) });
 
 export default function AuthScreen({ navigation }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLogin, setIsLogin] = useState(true);
+  const [loading, setLoading] = useState(true);
+
+  // Check if user is already logged in
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        navigation.replace('FoodLog'); // Auto-navigate if already logged in
+      } else {
+        setLoading(false);
+      }
+    });
+    return unsubscribe;
+  }, [navigation]);
 
   const handleAuth = async () => {
     if (!email || !password) return Alert.alert('Please enter both email and password');
@@ -26,11 +45,18 @@ export default function AuthScreen({ navigation }) {
     }
   };
 
+  if (loading) {
+    return (
+      <SafeAreaView style={[styles.container, { justifyContent: 'center' }]}>
+        <ActivityIndicator size="large" color="#1A237E" />
+      </SafeAreaView>
+    );
+  }
+
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       <Text style={styles.title}>{isLogin ? 'Login to Food Dude' : 'Register for Food Dude'}</Text>
 
-      {/* Email Input */}
       <TextInput
         style={styles.input}
         placeholder="Email"
@@ -40,7 +66,6 @@ export default function AuthScreen({ navigation }) {
         autoCapitalize="none"
       />
 
-      {/* Password Input */}
       <TextInput
         style={styles.input}
         placeholder="Password"
@@ -49,26 +74,23 @@ export default function AuthScreen({ navigation }) {
         secureTextEntry
       />
 
-      {/* Login/Register Button */}
       <TouchableOpacity style={styles.authButton} onPress={handleAuth}>
         <Text style={styles.authButtonText}>{isLogin ? 'Login' : 'Register'}</Text>
       </TouchableOpacity>
 
-      {/* Toggle Login/Register */}
       <TouchableOpacity onPress={() => setIsLogin(!isLogin)}>
         <Text style={styles.toggleText}>
           {isLogin ? "Don't have an account? Register" : 'Already have an account? Login'}
         </Text>
       </TouchableOpacity>
 
-      {/* Google Login Placeholder */}
       <TouchableOpacity
         style={styles.googleButton}
         onPress={() => Alert.alert('Google login coming soon!')}
       >
         <Text style={styles.googleText}>Sign in with Google</Text>
       </TouchableOpacity>
-    </View>
+    </SafeAreaView>
   );
 }
 
