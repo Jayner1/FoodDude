@@ -1,13 +1,12 @@
-// screens/FoodLogScreen.js
 import React, { useState, useEffect } from 'react';
-import { View, Button, Text, FlatList, Alert, StyleSheet, TouchableOpacity, TextInput, Platform } from 'react-native';
+import { View, Button, Text, FlatList, Alert, StyleSheet, TouchableOpacity, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
 import axios from 'axios';
 import { auth, db } from '../firebase';
 import { doc, getDoc, setDoc, updateDoc, arrayUnion } from 'firebase/firestore';
 import foodDatabase from '../foodDatabase.json';
-import { OPENAI_API_KEY } from '@env';
+import { AZURE_SPEECH_KEY, AZURE_REGION } from '@env';
 
 const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
 
@@ -22,7 +21,7 @@ export default function FoodLogScreen() {
 
   const userId = auth.currentUser?.uid;
 
-  /** Load logs from Firestore */
+  // ✅ Load food log from Firestore
   useEffect(() => {
     const loadLog = async () => {
       if (!userId) return;
@@ -35,7 +34,7 @@ export default function FoodLogScreen() {
           setLog(docSnap.data());
         } else {
           const emptyLog = {};
-          meals.forEach(m => emptyLog[m] = []);
+          meals.forEach(m => (emptyLog[m] = []));
           setLog(emptyLog);
           await setDoc(docRef, emptyLog);
         }
@@ -48,7 +47,7 @@ export default function FoodLogScreen() {
     loadLog();
   }, [userId]);
 
-  /** Save single food item to Firestore */
+  // ✅ Save a food item to Firestore
   const saveLog = async (mealName, foodItem) => {
     try {
       const docRef = doc(db, 'foodLogs', userId);
@@ -58,7 +57,31 @@ export default function FoodLogScreen() {
     }
   };
 
-  /** Audio recording setup */
+  // ✅ Save voice transcription logs to Firestore
+  const saveVoiceLog = async (text) => {
+    if (!userId || !text) return;
+    try {
+      const voiceRef = doc(db, 'voiceLogs', userId);
+      const docSnap = await getDoc(voiceRef);
+
+      const entry = {
+        text,
+        createdAt: new Date().toISOString(),
+      };
+
+      if (docSnap.exists()) {
+        await updateDoc(voiceRef, { logs: arrayUnion(entry) });
+      } else {
+        await setDoc(voiceRef, { logs: [entry] });
+      }
+
+      console.log('✅ Voice log saved to Firestore:', text);
+    } catch (err) {
+      console.error('🔥 Failed to save voice log:', err);
+    }
+  };
+
+  // ✅ Prepare audio recording
   const prepareAudio = async () => {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
@@ -67,7 +90,7 @@ export default function FoodLogScreen() {
     });
   };
 
-  /** Start recording */
+  // ✅ Start voice recording
   const startRecording = async () => {
     if (recording) return Alert.alert('Recording already in progress');
 
@@ -87,7 +110,7 @@ export default function FoodLogScreen() {
     }
   };
 
-  /** Stop recording */
+  // ✅ Stop recording and queue for processing
   const stopRecording = async () => {
     if (!recording) return;
     try {
@@ -102,7 +125,7 @@ export default function FoodLogScreen() {
     }
   };
 
-  /** Process recordings queue one at a time */
+  // ✅ Handle queued recordings and transcribe using Azure
   useEffect(() => {
     const processQueue = async () => {
       if (isProcessing || recordingQueue.length === 0) return;
@@ -112,44 +135,34 @@ export default function FoodLogScreen() {
       setRecordingQueue(rest);
 
       try {
-        // Transcribe audio via OpenAI Whisper
-        const formData = new FormData();
-        formData.append('file', {
-          uri,
-          name: 'recording.m4a',
-          type: 'audio/m4a',
-        });
-        formData.append('model', 'whisper-1');
+        const fileResponse = await fetch(uri);
+        const audioData = await fileResponse.blob();
 
-        let responseText = '';
-        try {
-          const response = await axios.post(
-            'https://api.openai.com/v1/audio/transcriptions',
-            formData,
-            {
-              headers: {
-                Authorization: `Bearer ${OPENAI_API_KEY}`,
-                'Content-Type': 'multipart/form-data',
-              },
-            }
-          );
-          responseText = response.data.text;
-        } catch (err) {
-          console.error(err);
-          if (err.response?.status === 429) {
-            Alert.alert('Rate limit hit. Try again in a few seconds.');
-            responseText = '';
-          } else {
-            Alert.alert('Transcription failed. Please try again.');
-            responseText = '';
+        const response = await axios.post(
+          `https://${AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US`,
+          audioData,
+          {
+            headers: {
+              'Ocp-Apim-Subscription-Key': AZURE_SPEECH_KEY,
+              'Content-Type': 'audio/m4a',
+              'Accept': 'application/json'
+            },
           }
-        }
+        );
 
-        // Clean transcription for database search
+        const responseText = response.data.DisplayText || '';
         const cleanText = responseText.trim().toLowerCase().replace(/[^a-z\s]/g, '');
         setTranscription(cleanText);
 
+        // ✅ Save transcription to Firestore voice logs
+        await saveVoiceLog(cleanText);
+
+        // ✅ Add recognized food to meal log
         if (cleanText) addFoodToMeal(cleanText);
+
+      } catch (err) {
+        console.error('Azure transcription error:', err.response?.data || err);
+        Alert.alert('Transcription failed. Check your Azure credentials or try again.');
       } finally {
         setIsProcessing(false);
       }
@@ -158,11 +171,9 @@ export default function FoodLogScreen() {
     processQueue();
   }, [recordingQueue, isProcessing]);
 
-  /** Add food item to log */
+  // ✅ Add food entry to selected meal
   const addFoodToMeal = (foodName) => {
-    const foodItem = foodDatabase.find(
-      f => f.foodName.toLowerCase() === foodName
-    );
+    const foodItem = foodDatabase.find(f => f.foodName.toLowerCase() === foodName);
 
     if (foodItem) {
       setLog(prev => {
@@ -175,21 +186,21 @@ export default function FoodLogScreen() {
     }
   };
 
-  /** Manual text input */
+  // ✅ Handle manual text entry
   const handleTextSubmit = () => {
     if (!textInput.trim()) return;
     addFoodToMeal(textInput.trim().toLowerCase());
     setTextInput('');
   };
 
-  /** Delete single item */
+  // ✅ Delete single food item
   const deleteItem = (meal, index) => {
     const newMealLog = [...(log[meal] || [])];
     newMealLog.splice(index, 1);
     setLog(prev => ({ ...prev, [meal]: newMealLog }));
   };
 
-  /** Clear entire meal */
+  // ✅ Clear meal from Firestore
   const clearMeal = async (meal) => {
     setLog(prev => ({ ...prev, [meal]: [] }));
     try {
@@ -200,13 +211,13 @@ export default function FoodLogScreen() {
     }
   };
 
+  // ✅ UI
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.headerText}>Food Dude</Text>
       </View>
 
-      {/* Meal selector */}
       <View style={styles.mealSelector}>
         {meals.map(meal => (
           <TouchableOpacity
@@ -219,14 +230,12 @@ export default function FoodLogScreen() {
         ))}
       </View>
 
-      {/* Recording buttons */}
       <View style={styles.controls}>
         <Button title="Start Recording" onPress={startRecording} color="#1A237E" />
         <View style={{ height: 10 }} />
         <Button title="Stop Recording" onPress={stopRecording} color="#1A237E" />
       </View>
 
-      {/* Manual input */}
       <TextInput
         style={styles.textInput}
         placeholder="Enter food manually..."
@@ -238,7 +247,6 @@ export default function FoodLogScreen() {
 
       <Text style={styles.transcription}>Last Entry: {transcription}</Text>
 
-      {/* Meal log */}
       <View style={styles.logHeader}>
         <Text style={styles.logTitle}>{selectedMeal} Log:</Text>
         <TouchableOpacity onPress={() => clearMeal(selectedMeal)}>

@@ -21,6 +21,7 @@
     "expo-status-bar": "~3.0.8",
     "ffmpeg-kit-react-native": "^6.0.2",
     "firebase": "^12.4.0",
+    "microsoft-cognitiveservices-speech-sdk": "^1.46.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "^0.81.4",
