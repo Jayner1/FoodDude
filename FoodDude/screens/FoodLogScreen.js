@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   TextInput,
   Button,
   ActivityIndicator,
+  AppState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
@@ -30,19 +31,21 @@ const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
 
 export default function FoodLogScreen() {
   const userId = auth.currentUser?.uid;
+  const appState = useRef(AppState.currentState);
 
   const [log, setLog] = useState({});
   const [selectedMeal, setSelectedMeal] = useState('Breakfast');
   const [textInput, setTextInput] = useState('');
   const [recording, setRecording] = useState(null);
   const [recordingQueue, setRecordingQueue] = useState([]);
+  const [manualQueue, setManualQueue] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [transcription, setTranscription] = useState('');
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
 
   // -------------------------
-  // Load Food Logs from Firestore (real-time)
+  // Real-time food log listener
   // -------------------------
   useEffect(() => {
     if (!userId) return;
@@ -75,7 +78,37 @@ export default function FoodLogScreen() {
   }, [userId]);
 
   // -------------------------
-  // Save food log to Firestore
+  // Sync offline manual queue when app comes online
+  // -------------------------
+  useEffect(() => {
+    const syncOfflineData = async () => {
+      if (!userId || manualQueue.length === 0) return;
+
+      for (const { meal, foodItem } of manualQueue) {
+        try {
+          const docRef = doc(db, 'foodLogs', userId);
+          await updateDoc(docRef, { [meal]: arrayUnion(foodItem) });
+        } catch (err) {
+          console.warn('Failed to sync manual queue', err);
+        }
+      }
+
+      setManualQueue([]);
+    };
+
+    const handleAppStateChange = nextAppState => {
+      if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
+        syncOfflineData();
+      }
+      appState.current = nextAppState;
+    };
+
+    AppState.addEventListener('change', handleAppStateChange);
+    return () => AppState.removeEventListener('change', handleAppStateChange);
+  }, [manualQueue, userId]);
+
+  // -------------------------
+  // Save manual food item
   // -------------------------
   const saveLog = async (mealName, foodItem) => {
     if (!userId) return;
@@ -83,7 +116,8 @@ export default function FoodLogScreen() {
       const docRef = doc(db, 'foodLogs', userId);
       await updateDoc(docRef, { [mealName]: arrayUnion(foodItem) });
     } catch (err) {
-      console.warn('Offline — write queued', err);
+      console.warn('Offline — queuing manual entry', err);
+      setManualQueue(prev => [...prev, { meal: mealName, foodItem }]);
     }
   };
 
@@ -104,11 +138,12 @@ export default function FoodLogScreen() {
       }
     } catch (err) {
       console.warn('Offline — voice log queued', err);
+      setManualQueue(prev => [...prev, { meal: 'voice', foodItem: { text } }]);
     }
   };
 
   // -------------------------
-  // Audio Recording
+  // Audio recording
   // -------------------------
   const prepareAudio = async () => {
     await Audio.setAudioModeAsync({
@@ -162,12 +197,10 @@ export default function FoodLogScreen() {
       setRecordingQueue(rest);
 
       try {
-        // Read recording as base64
         const audioBase64 = await FileSystem.readAsStringAsync(uri, {
           encoding: FileSystem.EncodingType.Base64,
         });
 
-        // Convert Base64 to Uint8Array
         const audioBytes = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
 
         const response = await axios.post(
