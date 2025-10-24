@@ -1,87 +1,115 @@
 import React, { useState, useEffect } from 'react';
-import { View, Button, Text, FlatList, Alert, StyleSheet, TouchableOpacity, TextInput } from 'react-native';
+import {
+  View,
+  Text,
+  FlatList,
+  Alert,
+  StyleSheet,
+  TouchableOpacity,
+  TextInput,
+  Button,
+  ActivityIndicator,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
 import axios from 'axios';
 import { auth, db } from '../firebase';
-import { doc, getDoc, setDoc, updateDoc, arrayUnion } from 'firebase/firestore';
+import {
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  arrayUnion,
+  onSnapshot,
+} from 'firebase/firestore';
 import foodDatabase from '../foodDatabase.json';
 import { AZURE_SPEECH_KEY, AZURE_REGION } from '@env';
 
 const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
 
 export default function FoodLogScreen() {
-  const [recording, setRecording] = useState(null);
-  const [transcription, setTranscription] = useState('');
+  const userId = auth.currentUser?.uid;
+
   const [log, setLog] = useState({});
   const [selectedMeal, setSelectedMeal] = useState('Breakfast');
   const [textInput, setTextInput] = useState('');
+  const [recording, setRecording] = useState(null);
   const [recordingQueue, setRecordingQueue] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [transcription, setTranscription] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [offline, setOffline] = useState(false);
 
-  const userId = auth.currentUser?.uid;
-
-  // ✅ Load food log from Firestore
+  // -------------------------
+  // Load Food Logs from Firestore (real-time)
+  // -------------------------
   useEffect(() => {
-    const loadLog = async () => {
-      if (!userId) return;
+    if (!userId) return;
+    setLoading(true);
 
-      try {
-        const docRef = doc(db, 'foodLogs', userId);
-        const docSnap = await getDoc(docRef);
+    const docRef = doc(db, 'foodLogs', userId);
 
-        if (docSnap.exists()) {
-          setLog(docSnap.data());
+    const unsubscribe = onSnapshot(
+      docRef,
+      snapshot => {
+        if (snapshot.exists()) {
+          setLog(snapshot.data());
         } else {
           const emptyLog = {};
           meals.forEach(m => (emptyLog[m] = []));
           setLog(emptyLog);
-          await setDoc(docRef, emptyLog);
+          setDoc(docRef, emptyLog);
         }
-      } catch (err) {
-        console.error('Failed to load log from Firestore', err);
-        Alert.alert('Error', 'Failed to load your food log. Check your internet connection.');
+        setOffline(false);
+        setLoading(false);
+      },
+      err => {
+        console.warn('Offline — using cached data', err);
+        setOffline(true);
+        setLoading(false);
       }
-    };
+    );
 
-    loadLog();
+    return () => unsubscribe();
   }, [userId]);
 
-  // ✅ Save a food item to Firestore
+  // -------------------------
+  // Save food log to Firestore
+  // -------------------------
   const saveLog = async (mealName, foodItem) => {
+    if (!userId) return;
     try {
       const docRef = doc(db, 'foodLogs', userId);
       await updateDoc(docRef, { [mealName]: arrayUnion(foodItem) });
     } catch (err) {
-      console.error('Failed to save log to Firestore', err);
+      console.warn('Offline — write queued', err);
     }
   };
 
-  // ✅ Save voice transcription logs to Firestore
-  const saveVoiceLog = async (text) => {
+  // -------------------------
+  // Save voice log
+  // -------------------------
+  const saveVoiceLog = async text => {
     if (!userId || !text) return;
     try {
       const voiceRef = doc(db, 'voiceLogs', userId);
       const docSnap = await getDoc(voiceRef);
-
-      const entry = {
-        text,
-        createdAt: new Date().toISOString(),
-      };
+      const entry = { text, createdAt: new Date().toISOString() };
 
       if (docSnap.exists()) {
         await updateDoc(voiceRef, { logs: arrayUnion(entry) });
       } else {
         await setDoc(voiceRef, { logs: [entry] });
       }
-
-      console.log('✅ Voice log saved to Firestore:', text);
     } catch (err) {
-      console.error('🔥 Failed to save voice log:', err);
+      console.warn('Offline — voice log queued', err);
     }
   };
 
-  // ✅ Prepare audio recording
+  // -------------------------
+  // Audio Recording
+  // -------------------------
   const prepareAudio = async () => {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
@@ -90,10 +118,8 @@ export default function FoodLogScreen() {
     });
   };
 
-  // ✅ Start voice recording
   const startRecording = async () => {
     if (recording) return Alert.alert('Recording already in progress');
-
     try {
       await prepareAudio();
       const { status } = await Audio.requestPermissionsAsync();
@@ -110,7 +136,6 @@ export default function FoodLogScreen() {
     }
   };
 
-  // ✅ Stop recording and queue for processing
   const stopRecording = async () => {
     if (!recording) return;
     try {
@@ -125,7 +150,9 @@ export default function FoodLogScreen() {
     }
   };
 
-  // ✅ Handle queued recordings and transcribe using Azure
+  // -------------------------
+  // Process queued recordings (Azure)
+  // -------------------------
   useEffect(() => {
     const processQueue = async () => {
       if (isProcessing || recordingQueue.length === 0) return;
@@ -135,17 +162,22 @@ export default function FoodLogScreen() {
       setRecordingQueue(rest);
 
       try {
-        const fileResponse = await fetch(uri);
-        const audioData = await fileResponse.blob();
+        // Read recording as base64
+        const audioBase64 = await FileSystem.readAsStringAsync(uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+
+        // Convert Base64 to Uint8Array
+        const audioBytes = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
 
         const response = await axios.post(
           `https://${AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US`,
-          audioData,
+          audioBytes,
           {
             headers: {
               'Ocp-Apim-Subscription-Key': AZURE_SPEECH_KEY,
               'Content-Type': 'audio/m4a',
-              'Accept': 'application/json'
+              Accept: 'application/json',
             },
           }
         );
@@ -154,15 +186,11 @@ export default function FoodLogScreen() {
         const cleanText = responseText.trim().toLowerCase().replace(/[^a-z\s]/g, '');
         setTranscription(cleanText);
 
-        // ✅ Save transcription to Firestore voice logs
         await saveVoiceLog(cleanText);
-
-        // ✅ Add recognized food to meal log
         if (cleanText) addFoodToMeal(cleanText);
-
       } catch (err) {
         console.error('Azure transcription error:', err.response?.data || err);
-        Alert.alert('Transcription failed. Check your Azure credentials or try again.');
+        Alert.alert('Transcription failed. Check your Azure credentials.');
       } finally {
         setIsProcessing(false);
       }
@@ -171,10 +199,11 @@ export default function FoodLogScreen() {
     processQueue();
   }, [recordingQueue, isProcessing]);
 
-  // ✅ Add food entry to selected meal
-  const addFoodToMeal = (foodName) => {
+  // -------------------------
+  // Add food item
+  // -------------------------
+  const addFoodToMeal = foodName => {
     const foodItem = foodDatabase.find(f => f.foodName.toLowerCase() === foodName);
-
     if (foodItem) {
       setLog(prev => {
         const updated = { ...prev, [selectedMeal]: [...(prev[selectedMeal] || []), foodItem] };
@@ -186,32 +215,34 @@ export default function FoodLogScreen() {
     }
   };
 
-  // ✅ Handle manual text entry
   const handleTextSubmit = () => {
     if (!textInput.trim()) return;
     addFoodToMeal(textInput.trim().toLowerCase());
     setTextInput('');
   };
 
-  // ✅ Delete single food item
   const deleteItem = (meal, index) => {
     const newMealLog = [...(log[meal] || [])];
     newMealLog.splice(index, 1);
     setLog(prev => ({ ...prev, [meal]: newMealLog }));
+
+    const docRef = doc(db, 'foodLogs', userId);
+    setDoc(docRef, { ...log, [meal]: newMealLog }, { merge: true }).catch(err => {
+      console.warn('Offline — delete queued', err);
+    });
   };
 
-  // ✅ Clear meal from Firestore
-  const clearMeal = async (meal) => {
+  const clearMeal = meal => {
     setLog(prev => ({ ...prev, [meal]: [] }));
-    try {
-      const docRef = doc(db, 'foodLogs', userId);
-      await setDoc(docRef, { ...log, [meal]: [] }, { merge: true });
-    } catch (err) {
-      console.error('Failed to clear meal in Firestore', err);
-    }
+    const docRef = doc(db, 'foodLogs', userId);
+    setDoc(docRef, { ...log, [meal]: [] }, { merge: true }).catch(err => {
+      console.warn('Offline — clear queued', err);
+    });
   };
 
-  // ✅ UI
+  // -------------------------
+  // UI
+  // -------------------------
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
@@ -254,20 +285,26 @@ export default function FoodLogScreen() {
         </TouchableOpacity>
       </View>
 
-      <FlatList
-        data={log[selectedMeal] || []}
-        keyExtractor={(item, index) => index.toString()}
-        renderItem={({ item, index }) => (
-          <View style={styles.logItem}>
-            <Text style={styles.logText}>
-              {item.foodName} - {item.calories} cal, {item.protein}g P, {item.carbs}g C, {item.fat}g F
-            </Text>
-            <TouchableOpacity onPress={() => deleteItem(selectedMeal, index)} style={styles.deleteButton}>
-              <Text style={styles.deleteText}>Delete</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-      />
+      {loading ? (
+        <ActivityIndicator size="large" color="#1A237E" />
+      ) : offline ? (
+        <Text style={styles.offlineText}>Offline — data may be outdated.</Text>
+      ) : (
+        <FlatList
+          data={log[selectedMeal] || []}
+          keyExtractor={(item, index) => index.toString()}
+          renderItem={({ item, index }) => (
+            <View style={styles.logItem}>
+              <Text style={styles.logText}>
+                {item.foodName} - {item.calories} cal, {item.protein}g P, {item.carbs}g C, {item.fat}g F
+              </Text>
+              <TouchableOpacity onPress={() => deleteItem(selectedMeal, index)} style={styles.deleteButton}>
+                <Text style={styles.deleteText}>Delete</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -290,4 +327,5 @@ const styles = StyleSheet.create({
   logText: { fontSize: 16, color: '#1A237E' },
   deleteButton: { backgroundColor: '#FF5252', paddingHorizontal: 10, borderRadius: 5 },
   deleteText: { color: '#fff', fontWeight: 'bold' },
+  offlineText: { textAlign: 'center', marginTop: 20, color: 'red', fontWeight: 'bold' },
 });
