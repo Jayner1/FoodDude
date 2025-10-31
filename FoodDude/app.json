@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -14,7 +14,10 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.jasonyale.fooddude"
+      "bundleIdentifier": "com.jasonyale.fooddude",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -22,10 +25,31 @@
         "backgroundColor": "#ffffff"
       },
       "package": "com.jasonyale.fooddude",
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-audio",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "useLegacyPackaging": false
+          }
+        }
+      ],
+      "expo-dev-client"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "e60a7c27-76fe-4212-a349-e7119cfd457d"
+      }
     }
   }
 }

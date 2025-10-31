@@ -1,3 +1,4 @@
+// screens/FoodLogScreen.js
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
@@ -10,11 +11,10 @@ import {
   Button,
   ActivityIndicator,
   AppState,
+  Platform,
+  PermissionsAndroid,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Audio } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
-import axios from 'axios';
 import { auth, db } from '../firebase';
 import {
   doc,
@@ -25,7 +25,8 @@ import {
   onSnapshot,
 } from 'firebase/firestore';
 import foodDatabase from '../foodDatabase.json';
-import { AZURE_SPEECH_KEY, AZURE_REGION } from '@env';
+import * as Speech from 'expo-speech';
+import Voice from '@react-native-voice/voice';
 
 const meals = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
 
@@ -36,39 +37,56 @@ export default function FoodLogScreen() {
   const [log, setLog] = useState({});
   const [selectedMeal, setSelectedMeal] = useState('Breakfast');
   const [textInput, setTextInput] = useState('');
-  const [recording, setRecording] = useState(null);
-  const [recordingQueue, setRecordingQueue] = useState([]);
   const [manualQueue, setManualQueue] = useState([]);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [transcription, setTranscription] = useState('');
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
+  const [transcription, setTranscription] = useState('');
+  const [recognizing, setRecognizing] = useState(false);
 
-  // -------------------------
-  // Real-time food log listener
-  // -------------------------
+  // ─── Initialize Voice ────────────────────────────────
+  useEffect(() => {
+    Voice.onSpeechResults = e => {
+      const spoken = e.value?.[0]?.toLowerCase().trim();
+      if (spoken) {
+        setTranscription(spoken);
+        saveVoiceLog(spoken);
+        addFoodToMeal(spoken);
+        Speech.speak(`Added ${spoken}`);
+      }
+      setRecognizing(false);
+    };
+
+    Voice.onSpeechError = e => {
+      console.error('Voice error:', e);
+      setRecognizing(false);
+      Alert.alert('Speech recognition error', e.error?.message || 'Unknown error');
+    };
+
+    return () => {
+      Voice.destroy().then(Voice.removeAllListeners);
+    };
+  }, []);
+
+  // ─── Firestore Sync ────────────────────────────────
   useEffect(() => {
     if (!userId) return;
     setLoading(true);
 
     const docRef = doc(db, 'foodLogs', userId);
-
     const unsubscribe = onSnapshot(
       docRef,
       snapshot => {
-        if (snapshot.exists()) {
-          setLog(snapshot.data());
-        } else {
-          const emptyLog = {};
-          meals.forEach(m => (emptyLog[m] = []));
-          setLog(emptyLog);
-          setDoc(docRef, emptyLog);
+        if (snapshot.exists()) setLog(snapshot.data());
+        else {
+          const empty = {};
+          meals.forEach(m => (empty[m] = []));
+          setLog(empty);
+          setDoc(docRef, empty);
         }
         setOffline(false);
         setLoading(false);
       },
-      err => {
-        console.warn('Offline — using cached data', err);
+      () => {
         setOffline(true);
         setLoading(false);
       }
@@ -77,205 +95,117 @@ export default function FoodLogScreen() {
     return () => unsubscribe();
   }, [userId]);
 
-  // -------------------------
-  // Sync offline manual queue when app comes online
-  // -------------------------
+  // ─── AppState Sync for Offline Queue ────────────────────────────────
   useEffect(() => {
-    const syncOfflineData = async () => {
+    const sync = async () => {
       if (!userId || manualQueue.length === 0) return;
-
       for (const { meal, foodItem } of manualQueue) {
-        try {
-          const docRef = doc(db, 'foodLogs', userId);
-          await updateDoc(docRef, { [meal]: arrayUnion(foodItem) });
-        } catch (err) {
-          console.warn('Failed to sync manual queue', err);
-        }
+        await updateDoc(doc(db, 'foodLogs', userId), { [meal]: arrayUnion(foodItem) }).catch(() => {});
       }
-
       setManualQueue([]);
     };
 
-    const handleAppStateChange = nextAppState => {
-      if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
-        syncOfflineData();
-      }
-      appState.current = nextAppState;
+    const handler = next => {
+      if (appState.current.match(/inactive|background/) && next === 'active') sync();
+      appState.current = next;
     };
 
-    AppState.addEventListener('change', handleAppStateChange);
-    return () => AppState.removeEventListener('change', handleAppStateChange);
+    const sub = AppState.addEventListener('change', handler);
+    return () => sub.remove();
   }, [manualQueue, userId]);
 
-  // -------------------------
-  // Save manual food item
-  // -------------------------
-  const saveLog = async (mealName, foodItem) => {
+  // ─── Permission Helper ────────────────────────────────
+  const requestMicPermission = async () => {
+    if (Platform.OS === 'android') {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+        {
+          title: 'Microphone Permission',
+          message: 'Food Dude needs access to your microphone for voice logging.',
+          buttonNeutral: 'Ask Me Later',
+          buttonNegative: 'Cancel',
+          buttonPositive: 'OK',
+        }
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    }
+    return true;
+  };
+
+  // ─── Core Firestore Operations ────────────────────────────────
+  const saveLog = async (meal, item) => {
     if (!userId) return;
     try {
-      const docRef = doc(db, 'foodLogs', userId);
-      await updateDoc(docRef, { [mealName]: arrayUnion(foodItem) });
-    } catch (err) {
-      console.warn('Offline — queuing manual entry', err);
-      setManualQueue(prev => [...prev, { meal: mealName, foodItem }]);
+      await updateDoc(doc(db, 'foodLogs', userId), { [meal]: arrayUnion(item) });
+    } catch {
+      setManualQueue(p => [...p, { meal, foodItem: item }]);
     }
   };
 
-  // -------------------------
-  // Save voice log
-  // -------------------------
   const saveVoiceLog = async text => {
     if (!userId || !text) return;
-    try {
-      const voiceRef = doc(db, 'voiceLogs', userId);
-      const docSnap = await getDoc(voiceRef);
-      const entry = { text, createdAt: new Date().toISOString() };
+    const entry = { text, createdAt: new Date().toISOString() };
+    const ref = doc(db, 'voiceLogs', userId);
+    const snap = await getDoc(ref);
+    if (snap.exists()) await updateDoc(ref, { logs: arrayUnion(entry) });
+    else await setDoc(ref, { logs: [entry] });
+  };
 
-      if (docSnap.exists()) {
-        await updateDoc(voiceRef, { logs: arrayUnion(entry) });
-      } else {
-        await setDoc(voiceRef, { logs: [entry] });
-      }
-    } catch (err) {
-      console.warn('Offline — voice log queued', err);
-      setManualQueue(prev => [...prev, { meal: 'voice', foodItem: { text } }]);
+  // ─── Voice Recognition ────────────────────────────────
+  const startRecognition = async () => {
+    const hasPermission = await requestMicPermission();
+    if (!hasPermission) {
+      Alert.alert('Permission denied', 'Please enable microphone access in settings.');
+      return;
     }
-  };
 
-  // -------------------------
-  // Audio recording
-  // -------------------------
-  const prepareAudio = async () => {
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
-    });
-  };
+    if (recognizing) return;
+    setRecognizing(true);
+    setTranscription('');
+    Alert.alert('Listening...', 'Say a food name (e.g., "apple")');
 
-  const startRecording = async () => {
-    if (recording) return Alert.alert('Recording already in progress');
     try {
-      await prepareAudio();
-      const { status } = await Audio.requestPermissionsAsync();
-      if (status !== 'granted') return Alert.alert('Microphone permission required.');
-
-      const rec = new Audio.Recording();
-      await rec.prepareToRecordAsync(Audio.RECORDING_OPTIONS_PRESET_HIGH_QUALITY);
-      await rec.startAsync();
-      setRecording(rec);
-      Alert.alert('Recording started. Speak now!');
+      await Voice.start('en-US');
     } catch (err) {
       console.error(err);
-      Alert.alert('Failed to start recording.');
+      setRecognizing(false);
+      Alert.alert('Speech error', err.message);
     }
   };
 
-  const stopRecording = async () => {
-    if (!recording) return;
-    try {
-      await recording.stopAndUnloadAsync();
-      const uri = recording.getURI();
-      setRecordingQueue(prev => [...prev, uri]);
-      setRecording(null);
-      Alert.alert('Recording saved. Processing transcription...');
-    } catch (err) {
-      console.error(err);
-      Alert.alert('Failed to stop recording.');
-    }
-  };
-
-  // -------------------------
-  // Process queued recordings (Azure)
-  // -------------------------
-  useEffect(() => {
-    const processQueue = async () => {
-      if (isProcessing || recordingQueue.length === 0) return;
-      setIsProcessing(true);
-
-      const [uri, ...rest] = recordingQueue;
-      setRecordingQueue(rest);
-
-      try {
-        const audioBase64 = await FileSystem.readAsStringAsync(uri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-
-        const audioBytes = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
-
-        const response = await axios.post(
-          `https://${AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US`,
-          audioBytes,
-          {
-            headers: {
-              'Ocp-Apim-Subscription-Key': AZURE_SPEECH_KEY,
-              'Content-Type': 'audio/m4a',
-              Accept: 'application/json',
-            },
-          }
-        );
-
-        const responseText = response.data.DisplayText || '';
-        const cleanText = responseText.trim().toLowerCase().replace(/[^a-z\s]/g, '');
-        setTranscription(cleanText);
-
-        await saveVoiceLog(cleanText);
-        if (cleanText) addFoodToMeal(cleanText);
-      } catch (err) {
-        console.error('Azure transcription error:', err.response?.data || err);
-        Alert.alert('Transcription failed. Check your Azure credentials.');
-      } finally {
-        setIsProcessing(false);
-      }
-    };
-
-    processQueue();
-  }, [recordingQueue, isProcessing]);
-
-  // -------------------------
-  // Add food item
-  // -------------------------
-  const addFoodToMeal = foodName => {
-    const foodItem = foodDatabase.find(f => f.foodName.toLowerCase() === foodName);
-    if (foodItem) {
-      setLog(prev => {
-        const updated = { ...prev, [selectedMeal]: [...(prev[selectedMeal] || []), foodItem] };
-        saveLog(selectedMeal, foodItem);
-        return updated;
-      });
+  // ─── Add Food Logic ────────────────────────────────
+  const addFoodToMeal = name => {
+    const item = foodDatabase.find(f => f.foodName.toLowerCase() === name);
+    if (item) {
+      setLog(p => ({ ...p, [selectedMeal]: [...(p[selectedMeal] || []), item] }));
+      saveLog(selectedMeal, item);
+      Speech.speak(`Added ${item.foodName}`);
     } else {
-      Alert.alert(`Food "${foodName}" not found in database.`);
+      Alert.alert(`Food "${name}" not found.`);
     }
   };
 
+  // ─── Manual Add ────────────────────────────────
   const handleTextSubmit = () => {
-    if (!textInput.trim()) return;
-    addFoodToMeal(textInput.trim().toLowerCase());
+    const t = textInput.trim().toLowerCase();
+    if (t) addFoodToMeal(t);
     setTextInput('');
   };
 
-  const deleteItem = (meal, index) => {
-    const newMealLog = [...(log[meal] || [])];
-    newMealLog.splice(index, 1);
-    setLog(prev => ({ ...prev, [meal]: newMealLog }));
-
-    const docRef = doc(db, 'foodLogs', userId);
-    setDoc(docRef, { ...log, [meal]: newMealLog }, { merge: true }).catch(err => {
-      console.warn('Offline — delete queued', err);
-    });
+  // ─── Delete / Clear ────────────────────────────────
+  const deleteItem = (meal, idx) => {
+    const newMeal = [...(log[meal] || [])];
+    newMeal.splice(idx, 1);
+    setLog(p => ({ ...p, [meal]: newMeal }));
+    setDoc(doc(db, 'foodLogs', userId), { ...log, [meal]: newMeal }, { merge: true }).catch(() => {});
   };
 
   const clearMeal = meal => {
-    setLog(prev => ({ ...prev, [meal]: [] }));
-    const docRef = doc(db, 'foodLogs', userId);
-    setDoc(docRef, { ...log, [meal]: [] }, { merge: true }).catch(err => {
-      console.warn('Offline — clear queued', err);
-    });
+    setLog(p => ({ ...p, [meal]: [] }));
+    setDoc(doc(db, 'foodLogs', userId), { ...log, [meal]: [] }, { merge: true }).catch(() => {});
   };
 
-  // -------------------------
-  // UI
-  // -------------------------
+  // ─── Render ────────────────────────────────
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
@@ -283,21 +213,24 @@ export default function FoodLogScreen() {
       </View>
 
       <View style={styles.mealSelector}>
-        {meals.map(meal => (
+        {meals.map(m => (
           <TouchableOpacity
-            key={meal}
-            style={[styles.mealButton, selectedMeal === meal && styles.selectedMeal]}
-            onPress={() => setSelectedMeal(meal)}
+            key={m}
+            style={[styles.mealButton, selectedMeal === m && styles.selectedMeal]}
+            onPress={() => setSelectedMeal(m)}
           >
-            <Text style={[styles.mealText, selectedMeal === meal && { color: '#FFD54F' }]}>{meal}</Text>
+            <Text style={[styles.mealText, selectedMeal === m && { color: '#FFD54F' }]}>{m}</Text>
           </TouchableOpacity>
         ))}
       </View>
 
       <View style={styles.controls}>
-        <Button title="Start Recording" onPress={startRecording} color="#1A237E" />
-        <View style={{ height: 10 }} />
-        <Button title="Stop Recording" onPress={stopRecording} color="#1A237E" />
+        <Button
+          title={recognizing ? 'Listening...' : 'Start Voice'}
+          onPress={startRecognition}
+          disabled={recognizing}
+          color="#1A237E"
+        />
       </View>
 
       <TextInput
@@ -325,7 +258,7 @@ export default function FoodLogScreen() {
       ) : (
         <FlatList
           data={log[selectedMeal] || []}
-          keyExtractor={(item, index) => index.toString()}
+          keyExtractor={(_, i) => i.toString()}
           renderItem={({ item, index }) => (
             <View style={styles.logItem}>
               <Text style={styles.logText}>
