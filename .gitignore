@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# caches
+**/.cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# builds
+build/
+dist/
+
+# OS
+.DS_Store
